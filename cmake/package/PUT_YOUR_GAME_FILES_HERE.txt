@@ -1,0 +1,3 @@
+Copy your own Countdown to Doomsday (DOS, v1.00) files into this folder:
+START.EXE, GAME.OVR, the .DAX files and the rest, as installed for DOS.
+This file can stay. See README.md.

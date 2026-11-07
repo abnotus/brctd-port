@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds ctd for Linux and Windows on every push and pull request. A tag
+# vX.Y.Z (equal to VERSION) also publishes a GitHub Release: both
+# packages, SHA256SUMS and build-provenance attestations, its notes from
+# CHANGELOG.md. Actions are pinned to commits; each job gets only the
+# permissions it needs.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  linux:
+    # Valve's Steam Runtime 3 "sniper" SDK (Debian 11, glibc 2.31, GCC 14),
+    # pinned by digest: the program runs on any distribution with glibc
+    # 2.29 or newer.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: registry.gitlab.steamos.cloud/steamrt/sniper/sdk@sha256:bb30053d3cd19d35c76ae69b2790dbaa1430448006f8240cb6d7e723f2d1940e
+    env:
+      CCACHE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: |
+          # The container runs as root, the workspace isn't root's: git
+          # (the version's commit) reads it only when marked safe.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cmake -S . -B build -G Ninja -DCOTD_RELEASE_FLAGS=ON \
+                -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build build
+      - name: Check what it needs to run
+        run: |
+          version=$(build/ctd version) && echo "$version"
+          case "$version" in *unknown*) echo "the version names no commit"; exit 1 ;; esac
+          need=$(objdump -T build/ctd | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "glibc needed: $need"
+          [ "$(printf '%s\n2.29\n' "$need" | sort -V | tail -1)" = "2.29" ] || { echo "needs glibc $need"; exit 1; }
+          if objdump -T build/ctd | grep -qE 'GLIBCXX_|CXXABI_'; then echo "needs a shared C++ runtime"; exit 1; fi
+      - name: Package
+        run: cpack --config build/CPackConfig.cmake -B dist && rm -rf dist/_CPack_Packages
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: dist/*.tar.xz
+          if-no-files-found: error
+
+  windows:
+    # Cross-built with MinGW-w64 (GCC 13, POSIX threads), as tested.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install MinGW-w64, CMake and Ninja
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mingw-w64 cmake ninja-build
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCOTD_RELEASE_FLAGS=ON \
+                -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake
+          cmake --build build
+      - name: Check what it needs to run
+        run: |
+          x86_64-w64-mingw32-objdump -p build/ctd.exe | grep -E 'Subsystem|DLL Name'
+          x86_64-w64-mingw32-objdump -p build/ctd.exe | grep -q 'Subsystem.*(Windows GUI)' \
+            || { echo "not a GUI program"; exit 1; }
+          system="advapi32 gdi32 imm32 kernel32 msvcrt ole32 oleaut32 setupapi shell32 user32 version winmm"
+          for dll in $(x86_64-w64-mingw32-objdump -p build/ctd.exe | sed -n 's/.*DLL Name: \(.*\)\.dll/\1/Ip' | tr '[:upper:]' '[:lower:]'); do
+            case " $system " in *" $dll "*) ;; *) echo "imports $dll.dll, not one of Windows' own"; exit 1 ;; esac
+          done
+      - name: Package
+        run: cpack --config build/CPackConfig.cmake -B dist && rm -rf dist/_CPack_Packages
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag is VERSION
+        run: |
+          version=$(head -n1 VERSION)
+          [ "${GITHUB_REF_NAME}" = "v${version}" ] || { echo "tag ${GITHUB_REF_NAME} but VERSION ${version}"; exit 1; }
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum ctd-* > SHA256SUMS && cat SHA256SUMS
+      # Attestations need a public repository (or GitHub Enterprise Cloud).
+      - if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/ctd-*
+      - name: The libraries' sources (LGPL-2.1 for Nuked-OPL3), as built
+        run: |
+          curl -fsSL -o dist/SDL3-3.4.18.tar.gz \
+            https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.tar.gz
+          curl -fsSL -o dist/Nuked-OPL3-765ec962e473aeb767e4cba74ffdc8f588ffbfe8.tar.gz \
+            https://github.com/nukeykt/Nuked-OPL3/archive/765ec962e473aeb767e4cba74ffdc8f588ffbfe8.tar.gz
+          printf '%s  %s\n' \
+            9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3 dist/SDL3-3.4.18.tar.gz \
+            2fad908c3904d3ef51b55e0d6a8980c7142942e2d0baa7e99bf038cf0a41199d dist/Nuked-OPL3-765ec962e473aeb767e4cba74ffdc8f588ffbfe8.tar.gz \
+            | sha256sum -c -
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${VERSION}" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^(## \[|\[)/ { exit }
+            on { print }' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for ${VERSION}"; exit 1; }
+          grep -qE "^## \[${VERSION}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md \
+            || { echo "CHANGELOG.md: give ${VERSION}'s section its release date"; exit 1; }
+          cat notes.md
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/ctd-* dist/SHA256SUMS dist/SDL3-* dist/Nuked-OPL3-* \
+            --title "ctd ${VERSION}" --notes-file notes.md --verify-tag

@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Build outputs (BUILDING.md) and the game files a player adds.
+/build/
+/build-win/
+/dist/
+/_CPack_Packages/
+/game/
+/saves/
+/ctd-logs/

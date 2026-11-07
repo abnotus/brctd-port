@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Bug report
+description: Something doesn't work or plays differently from the original
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What `ctd version` prints.
+      placeholder: 0.9.0 (abc1234)
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: Windows 11 / Ubuntu 24.04
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files
+      description: >
+        Attach the newest file from `ctd-logs` (it records your key presses, so
+        the session can be replayed). If ctd didn't accept your copy of the
+        game, attach `ctd-hashes.txt` instead.
